@@ -1,211 +1,209 @@
-# Implementation Roadmap
+# Implementation Roadmap v2
 
-## Phase 0 — Repository foundation
+The project should be built as thin vertical slices. Do not implement every subsystem before proving the end-to-end path.
 
-Goal: make the project understandable and testable before agent logic grows.
+## Phase 0 — Foundation and contracts
 
-Deliverables:
+Deliver:
 
-- TypeScript project
-- Bun or Node runtime decision
-- lint/typecheck/test scripts
-- `src/`, `tests/`, `docs/`
-- structured logger
-- task schema + validation
+- TypeScript + Bun project;
+- source layout from `README.md`;
+- schema validation for task/result/error/config;
+- structured logger with correlation IDs;
+- SQLite migration framework;
+- deterministic fake AGY executable for tests;
+- MCP capability/discovery spike against installed Codex.
 
 Exit criteria:
 
 ```text
-typecheck PASS
-tests PASS
-build PASS
+bun test PASS
+bun run typecheck PASS
+bun run build PASS
+fake worker probe PASS
 ```
 
-## Phase 1 — Minimal MCP bridge
-
-Goal: Codex can call one AGY worker reliably.
+## Phase 1 — Minimal end-to-end delegation
 
 Implement:
 
 ```text
-worker_execute
-worker_status
+delegate_task
+inspect_task
 ```
 
-Features:
-
-- MCP over stdio
-- spawn AGY
-- capture stdout/stderr/exit code
-- timeout/cancellation primitives
-- structured result normalization
-
-Exit test:
+Flow:
 
 ```text
-Codex -> MCP -> AGY -> answer -> MCP -> Codex
+Codex -> MCP stdio -> bridge -> fake/real AGY -> normalized result -> Codex
 ```
 
-## Phase 2 — Durable task/session model
+Include protocol negotiation, timeout and bounded output from day one.
 
-Goal: Codex and AGY can talk over multiple turns.
+## Phase 2 — Durable state + SQLite
+
+Implement tables/events for:
+
+```text
+tasks
+task_events
+attempts
+conversations
+workspaces
+```
+
+Add idempotency keys and mutation leases.
+
+Exit test: kill/restart bridge and recover a non-terminal task snapshot correctly.
+
+## Phase 3 — Worktree isolation
+
+Implement canonical repo identity, task branch/worktree lifecycle, base SHA tracking, cleanup policy and dirty-destination checks.
+
+Exit test: AGY can modify/test/commit while the destination workspace remains unchanged.
+
+## Phase 4 — Multi-turn worker conversations
 
 Implement:
 
 ```text
-worker_start
-worker_continue
-worker_get_result
-worker_cancel
+continue_task
+cancel_task
 ```
 
-Persist:
-
-- `task_id`
-- `session_id`
-- state
-- timestamps
-- transcript/events
+`AGYAdapter` owns all conversation resume semantics.
 
 Exit test:
 
 ```text
-Codex gives task
-AGY implements
+Codex delegates
+AGY commits
 Codex reviews
-Codex asks AGY to fix
-AGY resumes same session
+Codex requests fix
+AGY resumes same conversation/worktree
+AGY produces updated reviewed commit
 ```
 
-## Phase 3 — Git worktree isolation
+## Phase 5 — Verification gate
 
-Goal: AGY never needs to modify the primary workspace.
+Add configurable verification profiles and persisted command results.
 
-Implement:
+Requirements:
 
-- create task branch
-- create isolated worktree
-- record `base_commit`
-- run AGY inside that worktree
-- obtain diff/commit metadata
-- cleanup policy
+- worktree verification before review-ready result;
+- bounded runtime/output;
+- clear failure classification;
+- no `READY_TO_APPLY` when required checks fail.
 
-Exit test:
+## Phase 6 — Transactional Safe Apply
+
+Implement exact reviewed-commit validation and cherry-pick based apply.
+
+Add tables/events for `apply_attempts` and destination verification.
+
+Exit tests:
+
+- successful apply;
+- destination advanced;
+- dirty destination rejection;
+- cherry-pick conflict;
+- destination verification failure + configured rollback.
+
+## Phase 7 — Recovery and reconciliation
+
+Implement startup reconciliation across SQLite, Git and process state.
+
+Test crashes at boundaries:
+
+- after event persisted, before process start;
+- process started, bridge crashes;
+- worker commit created, result not persisted;
+- cherry-pick applied, bridge crashes before verification record;
+- verification complete, response transport lost.
+
+Recovery must be deterministic and idempotent.
+
+## Phase 8 — Security hardening
+
+Implement path canonicalization, explicit worker environment, command risk policy, secret redaction, protected Git operations, resource/output limits and optional network denial.
+
+Add negative tests for traversal, symlink escape and prohibited commands.
+
+## Phase 9 — Supervisor cost/escalation policy
+
+Only after the mechanics are reliable, optimize expensive supervisor usage.
+
+Suggested behavior:
 
 ```text
-main workspace remains unchanged while AGY works
+Codex plans once
+AGY implements
+Codex reviews compact diff/result
+AGY gets bounded repair attempts
+Codex takes over only for architecture/hard repeated failures
 ```
 
-## Phase 4 — Review and safe-apply gate
+Escalation signals may include repeated identical failure, no-progress patches, protected-path changes, policy failures, or architecture-level uncertainty.
 
-Goal: no worker code reaches the destination without review and verification.
+## Phase 10 — Operator UX
 
-Implement states:
+Add CLI/TUI helpers:
 
 ```text
-REVIEW_REQUIRED
-READY_TO_APPLY
-APPLYING
-APPLY_CONFLICT
-VERIFYING
-APPLIED
-APPLIED_VERIFICATION_FAILED
+codex-agy doctor
+codex-agy status
+codex-agy tasks
+codex-agy inspect <task>
+codex-agy logs <task>
+codex-agy recover
+codex-agy cleanup
 ```
 
-Checks:
+Optional tmux layout may show Codex, AGY, and status/log panes, but UI must not become a dependency of the orchestration core.
 
-- destination base commit
-- dirty working tree
-- conflict detection
-- apply
-- destination test/typecheck/build
+## Phase 11 — Performance and controlled parallelism
 
-## Phase 5 — Recovery and resilience
+Profile before optimizing.
 
-Goal: killing a terminal/process does not destroy task continuity.
+Potential improvements:
 
-Implement:
+- prepared worktree cache only if measured useful;
+- SQLite indexes from real query patterns;
+- configurable parallel workers for independent tasks;
+- output streaming/backpressure;
+- task log compaction/retention.
 
-- crash-safe task persistence
-- stale PID detection
-- AGY conversation resume
-- recover incomplete task
-- deterministic worktree discovery
-- protocol/provider/infrastructure failure classes
+Keep Safe Apply serialized per destination repo.
 
-## Phase 6 — Supervisor policy
+## Phase 12 — Optional remote execution
 
-Goal: Codex uses AGY for cheaper implementation and only takes over when needed.
+Only if a real requirement appears:
 
-Suggested policy:
+- Streamable HTTP transport;
+- authentication/authorization;
+- remote worker registry;
+- remote workspace/artifact model;
+- scheduler/queue if multiple hosts require it.
+
+Do not introduce Redis/brokers merely in anticipation of this phase.
+
+## First production-worthy milestone
+
+The first milestone is not “AGY can answer Codex”. It is this complete slice:
 
 ```text
-1. Codex plans.
-2. AGY implements.
-3. Codex reviews.
-4. AGY gets up to N repair attempts.
-5. Codex takes over only for hard failures or architectural changes.
+Codex delegates
+ -> durable task
+ -> isolated worktree
+ -> AGY implementation
+ -> verification
+ -> committed result
+ -> Codex review
+ -> one correction turn
+ -> exact commit approval
+ -> safe cherry-pick
+ -> destination verification
+ -> APPLIED
 ```
 
-Possible escalation rules:
-
-- same test fails 3 times
-- AGY repeats the same patch
-- protocol/provider failure persists
-- large architecture decision required
-- unsafe change touches protected paths
-
-## Phase 7 — Observability / operator UX
-
-Goal: make the two-agent workflow easy to watch.
-
-Add:
-
-- `codex-agy status`
-- `codex-agy tasks`
-- `codex-agy logs <task>`
-- tmux 2–3 pane launcher
-- live state display
-- transcript viewer
-
-Suggested terminal layout:
-
-```text
-┌─────────────────────┬─────────────────────┐
-│ Codex Supervisor    │ AGY Worker          │
-│                     │                     │
-│ plans / reviews     │ edits / tests       │
-├─────────────────────┴─────────────────────┤
-│ codex-agy status / logs                   │
-└───────────────────────────────────────────┘
-```
-
-## Phase 8 — Optional remote workers
-
-Only after the local version is stable:
-
-- MCP Streamable HTTP
-- authentication
-- remote worker registry
-- multiple AGY workers
-- queue/scheduler
-
-Do not start here; local stdio keeps v1 much simpler.
-
-## Recommended first milestone
-
-Build only this vertical slice first:
-
-```text
-Codex
-  -> worker_start
-  -> worker_execute
-  -> AGY changes isolated worktree
-  -> tests
-  -> structured result
-  -> Codex review
-  -> worker_continue
-  -> READY_TO_APPLY
-```
-
-Once that flow is reliable, add Safe Apply and recovery.
+It must also survive a bridge restart before being considered reliable.
